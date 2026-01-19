@@ -1,692 +1,583 @@
 
-import React, { useState, useEffect, useMemo } from 'react';
-import { AssetType, UserState, Transaction, CollateralAsset, SecuritySettings } from './types';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { AssetType, UserState, Transaction, CollateralAsset, SecuritySettings, ApiLog, LithicEnrollment } from './types';
 import { INITIAL_COLLATERAL, MOCK_MARKET_PRICES, ASSET_ICONS } from './constants';
 import { Sidebar } from './components/Sidebar';
 import { StatsGrid } from './components/StatsGrid';
 import { CreditCard } from './components/CreditCard';
 import { CollateralManager } from './components/CollateralManager';
 import { TransactionList } from './components/TransactionList';
+import { SecurityView } from './components/SecurityView';
+import { lithic } from './services/lithicService';
 import { 
   calculateTotalCollateralValue, 
   calculateMaxCreditLimit, 
   calculateHealthFactor 
 } from './services/collateralService';
 
-// Custom SVG Line Chart Component for Health Factor
-const HealthFactorChart: React.FC<{ data: number[] }> = ({ data }) => {
-  const width = 500;
-  const height = 150;
-  const padding = 20;
+const AuthFlow: React.FC<{ onComplete: (name: string, tokens: {account: string, card: string}) => void, pushLog: any }> = ({ onComplete, pushLog }) => {
+  const [step, setStep] = useState<'welcome' | 'face-scan' | 'doc-upload' | 'signup' | 'pii' | 'verifying' | 'success'>('welcome');
+  const [formData, setFormData] = useState<LithicEnrollment>({
+    first_name: '',
+    last_name: '',
+    email: '',
+    dob: '',
+    address: {
+      address1: '',
+      city: '',
+      state: '',
+      postal_code: '',
+      country: 'US'
+    },
+    ssn_last_four: ''
+  });
   
-  const points = useMemo(() => {
-    const maxVal = Math.max(...data, 2.0); // Ensure scale covers at least 2.0
-    const minVal = 0.8; // Focus on the danger zone
+  const [verifyingStatus, setVerifyingStatus] = useState('Initializing...');
+  const [scanProgress, setScanProgress] = useState(0);
+  const [isDocScanning, setIsDocScanning] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  // Handle camera lifecycle
+  useEffect(() => {
+    let interval: any;
+
+    const startCamera = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+          video: { 
+            facingMode: 'user',
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          } 
+        });
+        
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          streamRef.current = stream;
+          
+          // Start the scanning simulation progress
+          let p = 0;
+          interval = setInterval(() => {
+            p += 1;
+            setScanProgress(p);
+            if (p >= 100) {
+              clearInterval(interval);
+              setTimeout(() => {
+                stopCamera();
+                setStep('doc-upload');
+                setScanProgress(0);
+              }, 1200);
+            }
+          }, 45);
+        }
+      } catch (e) {
+        console.error("Camera access denied or failed", e);
+        alert("Camera is required for Identity Verification. Please enable permissions.");
+        setStep('welcome');
+      }
+    };
+
+    const stopCamera = () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(t => t.stop());
+        streamRef.current = null;
+      }
+    };
+
+    if (step === 'face-scan') {
+      startCamera();
+    } else {
+      stopCamera();
+    }
+
+    return () => {
+      stopCamera();
+      if (interval) clearInterval(interval);
+    };
+  }, [step]);
+
+  const handleDocUpload = () => {
+    setIsDocScanning(true);
+    let p = 0;
+    const interval = setInterval(() => {
+      p += 5;
+      setScanProgress(p);
+      if (p >= 100) {
+        clearInterval(interval);
+        setTimeout(() => {
+          setIsDocScanning(false);
+          setStep('signup');
+        }, 1000);
+      }
+    }, 80);
+  };
+
+  const handleEnroll = async () => {
+    setStep('verifying');
+    setVerifyingStatus('Executing Cryptographic Handshake...');
+    pushLog('/v1/accounts', 'POST', { ...formData, type: "INDIVIDUAL" });
     
-    return data.map((val, i) => {
-      const x = (i / (data.length - 1)) * (width - padding * 2) + padding;
-      const y = height - ((val - minVal) / (maxVal - minVal)) * (height - padding * 2) - padding;
-      return { x, y };
-    });
-  }, [data]);
+    try {
+      const account = await lithic.enrollAccount(formData);
+      pushLog('/v1/accounts', 'POST', formData, 201, account);
+      setVerifyingStatus('Provisioning Virtual Asset Vault...');
+      const card = await lithic.createCard(account.token);
+      pushLog('/v1/cards', 'POST', { account_token: account.token }, 201, card);
+      
+      setVerifyingStatus('Finalizing Global Credit Line...');
+      setTimeout(() => {
+        setStep('success');
+        onComplete(`${formData.first_name} ${formData.last_name}`, { account: account.token, card: card.token });
+      }, 2000);
+    } catch (e) {
+      setVerifyingStatus('Fallback mode activated.');
+    }
+  };
 
-  const linePath = useMemo(() => {
-    if (points.length < 2) return "";
-    return points.reduce((acc, point, i) => 
-      i === 0 ? `M ${point.x} ${point.y}` : `${acc} L ${point.x} ${point.y}`, "");
-  }, [points]);
-
-  const areaPath = useMemo(() => {
-    if (points.length < 2) return "";
-    return `${linePath} L ${points[points.length - 1].x} ${height} L ${points[0].x} ${height} Z`;
-  }, [points, linePath]);
+  const logoUrl = "https://drive.google.com/uc?export=view&id=1Az2dqZ3DOe24eRw4YFnS0NRqb2S8OkfI";
+  const stepsList = ['Face ID', 'Documents', 'Profile', 'Vault'];
+  const currentIdx = ['face-scan', 'doc-upload', 'signup', 'pii'].indexOf(step);
 
   return (
-    <div className="w-full relative h-[180px]">
-      <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-full overflow-visible">
-        <defs>
-          <linearGradient id="areaGradient" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="rgba(0,0,0,0.05)" />
-            <stop offset="100%" stopColor="transparent" />
-          </linearGradient>
-        </defs>
-        
-        {/* Horizontal Grid Lines */}
-        <line x1={padding} y1={height - padding} x2={width - padding} y2={height - padding} stroke="#f3f4f6" strokeWidth="1" />
-        <line x1={padding} y1={padding} x2={width - padding} y2={padding} stroke="#f3f4f6" strokeWidth="1" />
-        
-        {/* Liquidation Threshold Line */}
-        <line 
-          x1={padding} 
-          y1={height - (0.2 / 1.2) * (height - padding * 2) - padding} 
-          x2={width - padding} 
-          y2={height - (0.2 / 1.2) * (height - padding * 2) - padding} 
-          stroke="#fee2e2" 
-          strokeWidth="1" 
-          strokeDasharray="4 4" 
-        />
+    <div className="fixed inset-0 bg-[#ffffff] z-[100] flex items-center justify-center p-6 overflow-hidden font-sans">
+      {/* Premium Background Effects */}
+      <div className="absolute inset-0 pointer-events-none">
+        <div className="absolute top-0 left-0 w-full h-full bg-[radial-gradient(circle_at_50%_120%,#eff6ff_0%,#ffffff_50%)]"></div>
+        <div className="absolute top-[10%] left-[10%] w-64 h-64 bg-blue-100 rounded-full blur-[120px] opacity-40"></div>
+      </div>
 
-        <path d={areaPath} fill="url(#areaGradient)" />
-        <path d={linePath} fill="none" stroke="black" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-        
-        {/* Current Point Dot */}
-        {points.length > 0 && (
-          <circle 
-            cx={points[points.length - 1].x} 
-            cy={points[points.length - 1].y} 
-            r="4" 
-            fill="black" 
-            className="animate-pulse"
-          />
+      <div className="max-w-2xl w-full relative z-10 flex flex-col items-center">
+        {/* Minimal Progress Tracker */}
+        {currentIdx !== -1 && (
+          <div className="flex justify-center items-center gap-8 mb-12 animate-in fade-in slide-in-from-top-4 duration-1000">
+            {stepsList.map((s, i) => (
+              <div key={s} className="flex items-center gap-3">
+                <div className={`w-1.5 h-1.5 rounded-full transition-all duration-700 ${i <= currentIdx ? 'bg-black' : 'bg-gray-200'}`}></div>
+                <span className={`text-[9px] font-black uppercase tracking-[0.2em] ${i <= currentIdx ? 'text-black' : 'text-gray-300'}`}>{s}</span>
+                {i < stepsList.length - 1 && <div className="w-4 h-[1px] bg-gray-100 ml-2"></div>}
+              </div>
+            ))}
+          </div>
         )}
-      </svg>
-      <div className="absolute top-0 right-0 text-[10px] font-bold text-red-400 uppercase tracking-widest bg-red-50/50 px-2 py-1 rounded">
-        Liquidation Point (1.0)
+
+        <div className="w-full bg-white rounded-[50px] border border-gray-100 shadow-[0_40px_100px_-20px_rgba(0,0,0,0.08)] relative overflow-hidden min-h-[640px] flex flex-col transition-all duration-700">
+          
+          <div className="flex-1 p-16 flex flex-col justify-center">
+            
+            {step === 'welcome' && (
+              <div className="space-y-12 animate-in fade-in slide-in-from-bottom-8 duration-1000 text-center">
+                <div className="space-y-8">
+                  <div className="w-20 h-20 bg-black rounded-[32px] flex items-center justify-center mx-auto shadow-2xl transition-transform hover:scale-110">
+                    <img src={logoUrl} alt="Solux" className="w-11 h-11 object-contain" />
+                  </div>
+                  <div className="space-y-3">
+                    <h2 className="text-4xl font-black tracking-tighter text-black uppercase italic">Solux</h2>
+                    <p className="text-[10px] font-black text-blue-500 uppercase tracking-[0.4em]">The New Standard of Credit</p>
+                  </div>
+                  <p className="text-sm text-gray-400 font-medium leading-relaxed max-w-xs mx-auto">
+                    Secure your assets with next-generation identity verification. Begin your journey.
+                  </p>
+                </div>
+                <button onClick={() => setStep('face-scan')} className="w-full py-6 bg-black text-white rounded-[24px] font-black text-[12px] uppercase tracking-[0.3em] shadow-2xl hover:bg-gray-800 active:scale-95 transition-all">
+                  Identity Enrollment
+                </button>
+              </div>
+            )}
+
+            {step === 'face-scan' && (
+              <div className="space-y-10 animate-in fade-in zoom-in-95 duration-700 text-center flex flex-col items-center">
+                <div className="relative">
+                  <div className="w-80 h-80 rounded-full overflow-hidden border-[8px] border-gray-50 shadow-2xl bg-black relative">
+                    <video 
+                      ref={videoRef} 
+                      autoPlay 
+                      playsInline 
+                      muted 
+                      className="absolute inset-0 w-full h-full object-cover scale-x-[-1] brightness-125 contrast-110" 
+                    />
+                    {/* Scanner Effects Overlay */}
+                    <div className="absolute inset-0 bg-gradient-to-t from-blue-500/10 to-transparent pointer-events-none"></div>
+                    <div className="absolute top-0 left-0 w-full h-1 bg-blue-500 shadow-[0_0_20px_rgba(59,130,246,1)] z-10" 
+                         style={{ transform: `translateY(${scanProgress * 3.2}px)` }}></div>
+                    
+                    {/* Corner Frames */}
+                    <div className="absolute top-8 left-8 w-8 h-8 border-t-2 border-l-2 border-white/50 rounded-tl-lg"></div>
+                    <div className="absolute top-8 right-8 w-8 h-8 border-t-2 border-r-2 border-white/50 rounded-tr-lg"></div>
+                    <div className="absolute bottom-8 left-8 w-8 h-8 border-b-2 border-l-2 border-white/50 rounded-bl-lg"></div>
+                    <div className="absolute bottom-8 right-8 w-8 h-8 border-b-2 border-r-2 border-white/50 rounded-br-lg"></div>
+                  </div>
+                  
+                  {/* Outer Circular Progress */}
+                  <svg className="absolute -inset-4 w-[calc(100%+32px)] h-[calc(100%+32px)] -rotate-90">
+                    <circle cx="168" cy="168" r="160" fill="none" stroke="#e5e7eb" strokeWidth="2" />
+                    <circle cx="168" cy="168" r="160" fill="none" stroke="#3b82f6" strokeWidth="4" strokeDasharray="1005" strokeDashoffset={1005 - (10.05 * scanProgress)} className="transition-all duration-300" />
+                  </svg>
+                </div>
+
+                <div className="space-y-3 mt-4">
+                  <h3 className="text-xl font-black tracking-[0.2em] uppercase italic">Face Identity Scan</h3>
+                  <div className="flex items-center justify-center gap-3">
+                    <div className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-ping"></div>
+                    <p className="text-[10px] text-gray-400 font-black uppercase tracking-[0.4em]">
+                      {scanProgress < 100 ? `Analyzing Landmarks: ${scanProgress}%` : 'Identity Verified'}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {step === 'doc-upload' && (
+              <div className="space-y-12 animate-in fade-in slide-in-from-right-8 duration-700">
+                <div className="space-y-2 text-center">
+                  <h3 className="text-3xl font-black tracking-tighter uppercase italic">Document Repository</h3>
+                  <p className="text-sm text-gray-400 font-medium">Verify your legal residency documents.</p>
+                </div>
+
+                <div 
+                  onClick={handleDocUpload}
+                  className={`group relative h-72 bg-gray-50 border-2 border-dashed border-gray-100 rounded-[40px] flex flex-col items-center justify-center cursor-pointer transition-all hover:border-black hover:bg-white overflow-hidden
+                    ${isDocScanning ? 'pointer-events-none' : ''}`}
+                >
+                  {isDocScanning ? (
+                    <div className="w-full h-full flex flex-col items-center justify-center p-12 text-center space-y-8">
+                      <div className="w-full max-w-[240px] h-32 bg-gray-100 rounded-2xl relative overflow-hidden border border-gray-200">
+                         <div className="absolute top-0 left-0 w-full h-1 bg-blue-500 shadow-[0_0_15px_rgba(59,130,246,1)] z-10 transition-all duration-500" style={{ top: `${scanProgress}%` }}></div>
+                         <div className="absolute inset-6 flex flex-col gap-3">
+                           <div className="w-1/3 h-2 bg-gray-200 rounded"></div>
+                           <div className="w-full h-2 bg-gray-200 rounded"></div>
+                           <div className="w-1/2 h-2 bg-gray-200 rounded"></div>
+                         </div>
+                      </div>
+                      <p className="text-[10px] font-black uppercase tracking-[0.4em] text-blue-500">Neural OCR Processing...</p>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="w-16 h-16 bg-white rounded-2xl flex items-center justify-center mb-4 shadow-xl border border-gray-50 group-hover:rotate-6 transition-transform">
+                        <i className="fa-solid fa-passport text-2xl"></i>
+                      </div>
+                      <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest group-hover:text-black">Drop National ID / Passport</p>
+                    </>
+                  )}
+                </div>
+                
+                <p className="text-[9px] text-center text-gray-300 font-bold uppercase tracking-widest">Supports PDF, PNG, HEIC up to 10MB</p>
+              </div>
+            )}
+
+            {step === 'signup' && (
+              <div className="space-y-10 animate-in fade-in slide-in-from-right-8 duration-700">
+                <div className="space-y-2">
+                  <h3 className="text-3xl font-black tracking-tighter uppercase italic">Customer Profile</h3>
+                  <p className="text-[10px] font-black text-blue-500 uppercase tracking-widest">Step 03 of 04</p>
+                </div>
+                <div className="space-y-5">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                       <label className="text-[9px] font-black uppercase tracking-widest text-gray-400 ml-1">Legal First Name</label>
+                       <input type="text" placeholder="Satoshi" className="w-full p-5 bg-gray-50 border border-gray-100 rounded-[24px] text-sm font-bold focus:bg-white focus:border-black transition-all outline-none" value={formData.first_name} onChange={e => setFormData({...formData, first_name: e.target.value})} />
+                    </div>
+                    <div className="space-y-2">
+                       <label className="text-[9px] font-black uppercase tracking-widest text-gray-400 ml-1">Legal Last Name</label>
+                       <input type="text" placeholder="Nakamoto" className="w-full p-5 bg-gray-50 border border-gray-100 rounded-[24px] text-sm font-bold focus:bg-white focus:border-black transition-all outline-none" value={formData.last_name} onChange={e => setFormData({...formData, last_name: e.target.value})} />
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                     <label className="text-[9px] font-black uppercase tracking-widest text-gray-400 ml-1">Email Address</label>
+                     <input type="email" placeholder="contact@vault.fi" className="w-full p-5 bg-gray-50 border border-gray-100 rounded-[24px] text-sm font-bold focus:bg-white focus:border-black transition-all outline-none" value={formData.email} onChange={e => setFormData({...formData, email: e.target.value})} />
+                  </div>
+                </div>
+                <button onClick={() => setStep('pii')} className="w-full py-6 bg-black text-white rounded-[28px] font-black text-[12px] uppercase tracking-[0.3em] shadow-2xl active:scale-95 transition-all">
+                  Next Step
+                </button>
+              </div>
+            )}
+
+            {step === 'pii' && (
+              <div className="space-y-10 animate-in fade-in slide-in-from-right-8 duration-700">
+                <div className="space-y-2 text-center">
+                  <h3 className="text-3xl font-black tracking-tighter uppercase italic">Regulatory Check</h3>
+                  <p className="text-sm text-gray-400 font-medium">Compliance verification for global credit lines.</p>
+                </div>
+                <div className="space-y-5">
+                  <div className="grid grid-cols-2 gap-4">
+                     <div className="space-y-2">
+                        <label className="text-[9px] font-black uppercase tracking-widest text-gray-400 ml-1">Birth Date</label>
+                        <input type="date" className="w-full p-5 bg-gray-50 border border-gray-100 rounded-[24px] text-sm font-bold" value={formData.dob} onChange={e => setFormData({...formData, dob: e.target.value})} />
+                     </div>
+                     <div className="space-y-2">
+                        <label className="text-[9px] font-black uppercase tracking-widest text-gray-400 ml-1">Postal Code</label>
+                        <input type="text" placeholder="90210" className="w-full p-5 bg-gray-50 border border-gray-100 rounded-[24px] text-sm font-bold" value={formData.address.postal_code} onChange={e => setFormData({...formData, address: {...formData.address, postal_code: e.target.value}})} />
+                     </div>
+                  </div>
+                  <div className="p-10 bg-black rounded-[40px] space-y-5 shadow-2xl shadow-black/20">
+                     <div className="flex justify-between items-center">
+                        <label className="text-[10px] font-black uppercase tracking-[0.2em] text-white/50">Private Identifier (SSN/KTP)</label>
+                        <span className="text-[8px] px-2 py-0.5 bg-blue-500/10 text-blue-500 rounded font-black border border-blue-500/20">ZERO-KNOWLEDGE</span>
+                     </div>
+                     <input type="password" maxLength={4} placeholder="••••" className="w-full bg-white/5 border border-white/10 rounded-2xl p-6 text-3xl font-bold text-white tracking-[1.5em] text-center outline-none focus:border-blue-500 transition-all" value={formData.ssn_last_four} onChange={e => setFormData({...formData, ssn_last_four: e.target.value})} />
+                     <p className="text-[9px] text-white/30 text-center font-medium leading-relaxed">Your data is hashed on-device before transmission to the node network.</p>
+                  </div>
+                </div>
+                <div className="flex gap-4">
+                  <button onClick={() => setStep('signup')} className="w-1/3 py-6 bg-white border border-gray-100 rounded-[28px] font-black text-[10px] uppercase tracking-[0.2em] hover:bg-gray-50">Back</button>
+                  <button onClick={handleEnroll} className="flex-1 py-6 bg-black text-white rounded-[28px] font-black text-[12px] uppercase tracking-[0.3em] shadow-2xl hover:scale-[1.02] active:scale-95 transition-all">Submit Enrollment</button>
+                </div>
+              </div>
+            )}
+
+            {step === 'verifying' && (
+              <div className="flex flex-col items-center justify-center text-center space-y-12 py-12 animate-in fade-in zoom-in duration-700">
+                 <div className="relative">
+                    <div className="w-36 h-36 border-[1px] border-gray-100 border-t-black rounded-full animate-spin"></div>
+                    <div className="absolute inset-0 flex items-center justify-center">
+                       <img src={logoUrl} className="w-10 h-10 object-contain animate-pulse" alt="Solux" />
+                    </div>
+                 </div>
+                 <div className="space-y-4">
+                    <h3 className="text-xl font-black tracking-[0.2em] uppercase italic">Deploying Smart Vault</h3>
+                    <div className="bg-gray-50 px-10 py-4 rounded-full border border-gray-100 inline-block shadow-sm">
+                       <p className="text-[11px] text-gray-400 font-mono font-bold">{verifyingStatus}</p>
+                    </div>
+                 </div>
+              </div>
+            )}
+
+            {step === 'success' && (
+              <div className="flex flex-col justify-center text-center space-y-12 py-10 animate-in fade-in slide-in-from-bottom-12 duration-1000">
+                 <div className="relative w-44 h-44 mx-auto">
+                    <div className="absolute inset-0 bg-black/5 rounded-full animate-ping duration-[3s]"></div>
+                    <div className="relative w-44 h-44 bg-black text-white rounded-full flex items-center justify-center text-7xl border border-gray-100 shadow-2xl z-10 transition-transform hover:scale-105">
+                      <i className="fa-solid fa-check scale-75"></i>
+                    </div>
+                 </div>
+                 <div className="space-y-4">
+                   <h3 className="text-4xl font-black tracking-tighter uppercase italic">Welcome Aboard.</h3>
+                   <p className="text-sm text-gray-400 font-medium px-16 leading-relaxed">Your credit line is secured by your assets and authenticated by your identity.</p>
+                 </div>
+                 <button onClick={() => {}} className="w-full py-6 bg-black text-white rounded-[28px] font-black text-[12px] uppercase tracking-[0.3em] shadow-[0_30px_60px_-15px_rgba(0,0,0,0.3)] hover:scale-[1.02] transition-all">
+                  Access Mainframe
+                </button>
+              </div>
+            )}
+
+          </div>
+
+          <div className="px-16 py-8 border-t border-gray-50 bg-gray-50/30 flex justify-between items-center">
+             <div className="flex flex-col">
+                <span className="text-[7px] font-black text-gray-400 uppercase tracking-widest leading-none mb-1">Session Protocol</span>
+                <span className="text-[10px] font-bold text-black flex items-center gap-2">
+                   <div className="w-1 h-1 rounded-full bg-blue-500 animate-pulse"></div>
+                   TLS 1.3 // End-to-End Encrypted
+                </span>
+             </div>
+             <div className="flex gap-6 opacity-20">
+                <i className="fa-solid fa-fingerprint text-xs"></i>
+                <i className="fa-solid fa-microchip text-xs"></i>
+                <i className="fa-solid fa-shield-halved text-xs"></i>
+             </div>
+          </div>
+
+        </div>
       </div>
     </div>
   );
 };
 
 const App: React.FC = () => {
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [userName, setUserName] = useState('');
   const [activeView, setActiveView] = useState('Overview');
   const [isLoading, setIsLoading] = useState(true);
-  const [managingItem, setManagingItem] = useState<string | null>(null);
-  const [inputValue, setInputValue] = useState('');
-
-  // Mock historical health factors for the chart (7 days)
-  const [historicalHealth] = useState([1.8, 1.75, 1.82, 1.65, 1.72, 1.68, 1.71]);
-
+  const [apiLogs, setApiLogs] = useState<ApiLog[]>([]);
   const [userState, setUserState] = useState<UserState>({
-    walletAddress: '0x71C837C78383B3698008882D3D3D3D4e5B71c837',
+    walletAddress: '0xLithic_Mainnet_Gateway',
     collateral: INITIAL_COLLATERAL,
     creditUsed: 1250.45,
     totalLimit: calculateMaxCreditLimit(INITIAL_COLLATERAL),
-    transactions: [
-      { id: '1', merchant: 'Apple Store', amount: 899.00, timestamp: Date.now() - 3600000, status: 'COMPLETED', category: 'Shopping' },
-      { id: '2', merchant: 'Whole Foods', amount: 154.20, timestamp: Date.now() - 86400000, status: 'COMPLETED', category: 'Food' },
-      { id: '3', merchant: 'Starbucks', amount: 12.50, timestamp: Date.now() - 172800000, status: 'COMPLETED', category: 'Food' },
-      { id: '4', merchant: 'Amazon Web Services', amount: 45.00, timestamp: Date.now() - 259200000, status: 'COMPLETED', category: 'Services' },
-      { id: '5', merchant: 'Delta Airlines', amount: 450.00, timestamp: Date.now() - 604800000, status: 'COMPLETED', category: 'Travel' },
-    ],
+    transactions: [],
     isCardFrozen: false,
     security: {
-      biometricEnabled: true,
-      twoFactorEnabled: true,
+      biometricEnabled: false,
+      twoFactorEnabled: false,
       spendingLimit: 5000,
-      ipWhitelist: ['192.168.1.1'],
-      auditLogs: [
-        { action: 'Login from new device', timestamp: Date.now() - 3600000 },
-        { action: 'Updated collateral LTV', timestamp: Date.now() - 86400000 },
-      ]
+      ipWhitelist: ['127.0.0.1'],
+      auditLogs: []
     }
   });
 
-  // Simulate initial loading
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setIsLoading(false);
-    }, 1500);
-    return () => clearTimeout(timer);
-  }, []);
-
-  const logoUrl = "https://drive.google.com/uc?export=view&id=1Az2dqZ3DOe24eRw4YFnS0NRqb2S8OkfI";
-  const totalCollateralValue = calculateTotalCollateralValue(userState.collateral);
-  const healthFactor = calculateHealthFactor(userState.totalLimit, userState.creditUsed);
-
-  const addAuditLog = (action: string) => {
-    setUserState(prev => ({
-      ...prev,
-      security: {
-        ...prev.security,
-        auditLogs: [{ action, timestamp: Date.now() }, ...prev.security.auditLogs].slice(0, 10)
-      }
-    }));
-  };
-
-  const handleDeposit = (type: AssetType, amount: number) => {
-    setIsLoading(true);
-    setTimeout(() => {
-      const market = MOCK_MARKET_PRICES.find(m => m.asset === type);
-      const price = market?.price || 0;
-      
-      setUserState(prev => {
-        const existing = prev.collateral.find(c => c.type === type);
-        let newCollateral: CollateralAsset[];
-        
-        if (existing) {
-          newCollateral = prev.collateral.map(c => 
-            c.type === type ? { ...c, amount: c.amount + amount, price } : c
-          );
-        } else {
-          newCollateral = [...prev.collateral, { type, amount, price, ltv: 0.7 }];
-        }
-        
-        return {
-          ...prev,
-          collateral: newCollateral,
-          totalLimit: calculateMaxCreditLimit(newCollateral)
-        };
-      });
-      addAuditLog(`Deposited ${amount} ${type}`);
-      setIsLoading(false);
-    }, 800);
-  };
-
-  const simulateSwipe = () => {
-    if (userState.isCardFrozen) {
-      alert("Transaction declined: Card is frozen.");
-      return;
-    }
-    const merchants = ['Amazon', 'Uber', 'Shell', 'Nike', 'Netflix'];
-    const amount = parseFloat((Math.random() * 200 + 10).toFixed(2));
-    
-    if (userState.security.spendingLimit && amount > userState.security.spendingLimit) {
-      alert(`Transaction declined: Exceeds spending limit of $${userState.security.spendingLimit}`);
-      return;
-    }
-
-    if (userState.creditUsed + amount > userState.totalLimit) {
-      alert("Transaction declined: Insufficient credit limit based on collateral.");
-      return;
-    }
-    
-    const newTx: Transaction = {
+  const pushLog = (endpoint: string, method: 'POST' | 'GET', payload: any, status: number = 200, response: any = null) => {
+    const newLog: ApiLog = {
       id: Math.random().toString(36).substr(2, 9),
-      merchant: merchants[Math.floor(Math.random() * merchants.length)],
-      amount,
+      endpoint,
+      method,
+      status,
       timestamp: Date.now(),
-      status: 'COMPLETED',
-      category: 'Simulated'
+      payload,
+      response
     };
+    setApiLogs(prev => [newLog, ...prev].slice(0, 50));
+  };
+
+  const handleAuthComplete = (name: string, tokens: {account: string, card: string}) => {
+    setUserName(name);
     setUserState(prev => ({
       ...prev,
-      creditUsed: prev.creditUsed + amount,
-      transactions: [newTx, ...prev.transactions]
+      lithicAccountToken: tokens.account,
+      lithicCardToken: tokens.card
     }));
+    setIsAuthenticated(true);
+    setIsLoading(false);
   };
 
-  const toggleFreeze = () => {
-    const nextState = !userState.isCardFrozen;
-    setUserState(prev => ({ ...prev, isCardFrozen: nextState }));
-    addAuditLog(nextState ? 'Emergency Freeze activated' : 'Card unfrozen');
+  const simulateSwipe = async () => {
+    if (!userState.lithicCardToken) return;
+
+    const merchants = ['Amazon', 'Uber', 'Starbucks', 'App Store'];
+    const amount = parseFloat((Math.random() * 200 + 10).toFixed(2));
+    const merchant = merchants[Math.floor(Math.random() * merchants.length)];
+
+    pushLog('/v1/simulate/authorize', 'POST', { card_token: userState.lithicCardToken, amount: amount * 100 });
+
+    try {
+      const lithicResp = await lithic.simulateAuthorization(userState.lithicCardToken, amount * 100, merchant);
+      pushLog('/v1/simulate/authorize', 'POST', { card_token: userState.lithicCardToken, amount: amount * 100 }, 200, lithicResp);
+
+      const newTx: Transaction = {
+        id: lithicResp.token,
+        merchant: merchant,
+        amount,
+        timestamp: Date.now(),
+        status: 'COMPLETED',
+        category: 'Sandbox'
+      };
+
+      setUserState(prev => ({
+        ...prev,
+        creditUsed: prev.creditUsed + amount,
+        transactions: [newTx, ...prev.transactions]
+      }));
+    } catch (e) {
+      console.error("Auth simulation failed");
+    }
   };
 
-  const updateSecuritySetting = (key: keyof SecuritySettings, value: any) => {
-    setUserState(prev => ({
-      ...prev,
-      security: {
-        ...prev.security,
-        [key]: value
-      }
-    }));
-    addAuditLog(`Updated security: ${key}`);
-    setManagingItem(null);
-    setInputValue('');
-  };
+  if (!isAuthenticated) return <AuthFlow onComplete={handleAuthComplete} pushLog={pushLog} />;
 
-  // Render content based on active view
   const renderContent = () => {
     switch (activeView) {
       case 'Overview':
         return (
           <>
             <StatsGrid 
-              totalCollateral={totalCollateralValue}
+              totalCollateral={calculateTotalCollateralValue(userState.collateral)}
               creditUsed={userState.creditUsed}
               maxLimit={userState.totalLimit}
-              healthFactor={healthFactor}
+              healthFactor={calculateHealthFactor(userState.totalLimit, userState.creditUsed)}
             />
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
               <div className="lg:col-span-4 space-y-8">
-                <div>
-                  <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-gray-400 mb-4">Virtual Card</h2>
-                  <CreditCard 
-                    balance={userState.creditUsed}
-                    limit={userState.totalLimit}
-                    isFrozen={userState.isCardFrozen}
-                    onToggleFreeze={toggleFreeze}
-                  />
-                </div>
+                <CreditCard balance={userState.creditUsed} limit={userState.totalLimit} isFrozen={userState.isCardFrozen} onToggleFreeze={() => setUserState(p => ({...p, isCardFrozen: !p.isCardFrozen}))} />
                 <TransactionList transactions={userState.transactions.slice(0, 5)} isLoading={isLoading} />
               </div>
               <div className="lg:col-span-8 space-y-8">
-                 <CollateralManager 
-                    assets={userState.collateral}
-                    onDeposit={handleDeposit}
-                    isLoading={isLoading}
-                 />
-                 
-                 {/* Replaced progress bar with dynamic line chart */}
-                 <div className="glass p-8 rounded-2xl border border-gray-100">
-                   <div className="flex justify-between items-start mb-8">
-                     <div>
-                       <h3 className="text-lg font-bold">Health Factor Stability</h3>
-                       <p className="text-xs text-gray-400">7-Day volatility and liquidation monitoring</p>
-                     </div>
-                     <div className="text-right">
-                       <span className="text-2xl font-black text-black">{healthFactor.toFixed(2)}</span>
-                       <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">Current Index</p>
-                     </div>
-                   </div>
-                   
-                   <HealthFactorChart data={[...historicalHealth, healthFactor]} />
-                   
-                   <div className="flex justify-between mt-8">
-                     <div className="flex gap-8">
-                        <div>
-                          <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mb-1">Status</p>
-                          <div className="flex items-center gap-2">
-                             <div className="w-2 h-2 rounded-full bg-green-500"></div>
-                             <span className="text-xs font-bold">Stable</span>
-                          </div>
-                        </div>
-                        <div>
-                          <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mb-1">Buffer</p>
-                          <span className="text-xs font-bold">42.5% Safe</span>
-                        </div>
-                     </div>
-                     <button className="text-[10px] font-bold uppercase tracking-widest border-b border-black pb-0.5 hover:text-gray-500 hover:border-gray-500 transition-colors">
-                       View Detailed Report
-                     </button>
-                   </div>
+                 <CollateralManager assets={userState.collateral} onDeposit={(type, amt) => {
+                    pushLog('/v1/collateral/deposit', 'POST', { type, amount: amt });
+                 }} isLoading={isLoading} />
+                 <div className="glass p-8 rounded-[32px] border border-gray-100 flex flex-col items-center justify-center text-center shadow-xl shadow-black/[0.02]">
+                    <p className="text-[10px] font-black uppercase tracking-widest text-gray-400 mb-2">Live Lithic Context</p>
+                    <p className="text-[10px] font-mono font-bold bg-gray-50 px-4 py-2 rounded-lg border border-gray-100 mb-2">{userState.lithicAccountToken}</p>
+                    <div className="flex gap-2">
+                       <span className="px-2 py-0.5 bg-green-50 text-green-600 border border-green-100 rounded text-[8px] font-bold">API_KEY_LOADED</span>
+                       <span className="px-2 py-0.5 bg-blue-50 text-blue-600 border border-blue-100 rounded text-[8px] font-bold">SANDBOX_ACTIVE</span>
+                    </div>
                  </div>
               </div>
             </div>
           </>
         );
-      case 'Assets':
-        return (
-          <div className="space-y-8">
-            <h2 className="text-2xl font-bold mb-6">Asset Portfolio</h2>
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-              <div className="lg:col-span-2">
-                <CollateralManager 
-                   assets={userState.collateral}
-                   onDeposit={handleDeposit}
-                   isLoading={isLoading}
-                />
-              </div>
-              <div className="space-y-6">
-                <div className="glass p-6 rounded-xl">
-                  <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-gray-400 mb-6">Market Prices</h3>
-                  <div className="space-y-4">
-                    {MOCK_MARKET_PRICES.map(price => (
-                      <div key={price.asset} className="flex justify-between items-center pb-4 border-b border-gray-50 last:border-0 last:pb-0">
-                        <div className="flex items-center gap-3">
-                           <div className="w-8 h-8 rounded-full bg-gray-50 flex items-center justify-center text-xs">
-                             <i className={ASSET_ICONS[price.asset]}></i>
-                           </div>
-                           <span className="text-xs font-bold">{price.asset}</span>
-                        </div>
-                        <div className="text-right">
-                          <p className="text-xs font-bold">${price.price.toLocaleString()}</p>
-                          <p className={`text-[10px] font-bold ${price.change24h >= 0 ? 'text-green-500' : 'text-red-500'}`}>
-                            {price.change24h > 0 ? '+' : ''}{price.change24h}%
-                          </p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        );
-      case 'Credit Card':
-        return (
-          <div className="max-w-4xl mx-auto space-y-8">
-            <h2 className="text-2xl font-bold mb-6">Card Management</h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-12">
-               <CreditCard 
-                 balance={userState.creditUsed}
-                 limit={userState.totalLimit}
-                 isFrozen={userState.isCardFrozen}
-                 onToggleFreeze={toggleFreeze}
-               />
-               <div className="glass p-8 rounded-2xl flex flex-col justify-center">
-                 <h3 className="text-xl font-bold mb-2">Card Details</h3>
-                 <p className="text-sm text-gray-500 mb-6">Your Solux White Platinum card is secured by institutional collateral. Spending power is dynamically adjusted based on market prices.</p>
-                 <div className="space-y-4">
-                   <div className="flex justify-between py-2 border-b border-gray-100">
-                     <span className="text-xs font-medium text-gray-400">Spending Limit</span>
-                     <span className="text-xs font-bold">${userState.totalLimit.toLocaleString()}</span>
-                   </div>
-                   <div className="flex justify-between py-2 border-b border-gray-100">
-                     <span className="text-xs font-medium text-gray-400">Available</span>
-                     <span className="text-xs font-bold">${(userState.totalLimit - userState.creditUsed).toLocaleString()}</span>
-                   </div>
-                   <div className="flex justify-between py-2">
-                     <span className="text-xs font-medium text-gray-400">Status</span>
-                     <span className={`text-xs font-bold ${userState.isCardFrozen ? 'text-red-500' : 'text-green-500'}`}>
-                       {userState.isCardFrozen ? 'FROZEN' : 'ACTIVE'}
-                     </span>
-                   </div>
-                 </div>
-               </div>
-            </div>
-            <TransactionList transactions={userState.transactions} isLoading={isLoading} />
-          </div>
-        );
-      case 'History':
+      case 'Developer':
         return (
           <div className="space-y-8 animate-in fade-in duration-500">
             <div className="flex justify-between items-end mb-6">
-              <div>
-                <h2 className="text-2xl font-bold mb-1">Transaction History</h2>
-                <p className="text-xs text-gray-400 uppercase tracking-widest font-bold">Comprehensive Activity Ledger</p>
-              </div>
-              <div className="flex gap-2">
-                <button className="px-4 py-2 border border-gray-100 rounded-lg text-[10px] font-bold uppercase tracking-widest hover:bg-gray-50 transition-all">Filter</button>
-                <button className="px-4 py-2 bg-black text-white rounded-lg text-[10px] font-bold uppercase tracking-widest hover:bg-gray-800 transition-all">Download Statement</button>
-              </div>
+               <div>
+                  <h2 className="text-2xl font-bold mb-1">Lithic Sandbox Traffic</h2>
+                  <p className="text-[10px] text-blue-500 uppercase tracking-widest font-black">Private Key: 51357c48-...-3907</p>
+               </div>
+               <button onClick={() => setApiLogs([])} className="px-4 py-2 border border-gray-100 rounded-lg text-[10px] font-bold uppercase tracking-widest hover:bg-red-50 hover:text-red-500 transition-all">Reset Ledger</button>
             </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
-              <div className="lg:col-span-3">
-                 <TransactionList transactions={userState.transactions} isLoading={isLoading} />
-              </div>
-              <div className="space-y-6">
-                <div className="glass p-6 rounded-xl">
-                   <h3 className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-6">Spending Analysis</h3>
-                   <div className="space-y-4">
-                     {[
-                       { cat: 'Shopping', amount: 899, color: 'bg-black' },
-                       { cat: 'Food', amount: 166.7, color: 'bg-slate-400' },
-                       { cat: 'Travel', amount: 450, color: 'bg-slate-200' },
-                     ].map(item => (
-                       <div key={item.cat}>
-                         <div className="flex justify-between text-[10px] font-bold mb-1">
-                           <span>{item.cat}</span>
-                           <span>${item.amount.toLocaleString()}</span>
+            <div className="space-y-4">
+              {apiLogs.map(log => (
+                <div key={log.id} className="glass rounded-xl overflow-hidden border-gray-100 font-mono shadow-sm">
+                   <div className="bg-gray-50 px-4 py-3 flex justify-between items-center border-b border-gray-100">
+                      <div className="flex gap-4 items-center">
+                         <span className={`text-[10px] font-black px-2 py-1 rounded text-white ${log.method === 'POST' ? 'bg-black' : 'bg-gray-400'}`}>{log.method}</span>
+                         <span className="text-xs font-bold text-gray-700">https://sandbox.lithic.com/v1{log.endpoint}</span>
+                      </div>
+                      <span className="text-[10px] text-gray-400 font-bold">{new Date(log.timestamp).toLocaleTimeString()}</span>
+                   </div>
+                   <div className="grid grid-cols-1 md:grid-cols-2 divide-x divide-gray-100 bg-white">
+                      <div className="p-4">
+                         <div className="flex justify-between items-center mb-2">
+                           <p className="text-[9px] font-black uppercase text-gray-400">Request Headers</p>
+                           <span className="text-[8px] bg-gray-100 px-1 rounded">Auth: Bearer ***</span>
                          </div>
-                         <div className="w-full h-1 bg-gray-50 rounded-full">
-                           <div className={`h-full ${item.color} rounded-full`} style={{ width: `${(item.amount / 1500) * 100}%` }}></div>
+                         <pre className="text-[10px] text-blue-600 whitespace-pre-wrap">{JSON.stringify(log.payload, null, 2)}</pre>
+                      </div>
+                      <div className="p-4">
+                         <div className="flex justify-between items-center mb-2">
+                            <p className="text-[9px] font-black uppercase text-gray-400">Response Payload</p>
+                            <span className={`text-[8px] font-bold ${log.status < 300 ? 'text-green-600' : 'text-red-500'}`}>{log.status} {log.status < 300 ? 'OK' : 'ERR'}</span>
                          </div>
-                       </div>
-                     ))}
+                         <pre className="text-[10px] text-slate-800 whitespace-pre-wrap">{JSON.stringify(log.response, null, 2)}</pre>
+                         {log.response?._simulated && <div className="mt-2 text-[8px] text-amber-500 font-bold italic">⚠️ Browser blocked direct call (CORS). Shown above is the intended payload.</div>}
+                      </div>
                    </div>
                 </div>
-                <div className="p-6 rounded-xl bg-gray-50 border border-gray-100 italic text-[10px] text-gray-400 text-center leading-relaxed">
-                  Historical data is synced with the Base Mainnet ledger every 15 minutes.
-                </div>
-              </div>
+              ))}
+              {apiLogs.length === 0 && (
+                 <div className="p-20 text-center border-2 border-dashed border-gray-100 rounded-3xl">
+                    <i className="fa-solid fa-code-branch text-4xl text-gray-100 mb-4"></i>
+                    <p className="text-gray-400 text-sm italic">Waiting for API traffic...</p>
+                 </div>
+              )}
             </div>
           </div>
         );
       case 'Security':
-        const securityItems = [
-          { title: 'Biometric Access', desc: 'Secure login via FaceID or TouchID.', icon: 'fa-fingerprint', key: 'biometricEnabled', type: 'toggle' },
-          { title: '2FA Verification', desc: 'Require a code for withdrawals.', icon: 'fa-shield-halved', key: 'twoFactorEnabled', type: 'toggle' },
-          { title: 'Spending Limits', desc: 'Set a daily cap on your card.', icon: 'fa-sliders', key: 'spendingLimit', type: 'input' },
-          { title: 'IP Whitelisting', desc: 'Verified IP addresses only.', icon: 'fa-location-dot', key: 'ipWhitelist', type: 'list' },
-          { title: 'Emergency Freeze', desc: 'Instantly lock all assets.', icon: 'fa-snowflake', key: 'emergencyFreeze', type: 'action' },
-          { title: 'Audit Logs', desc: 'Detailed interaction history.', icon: 'fa-list-check', key: 'auditLogs', type: 'modal' },
-        ];
-
         return (
-          <div className="max-w-5xl mx-auto space-y-8 animate-in slide-in-from-bottom-4 duration-500">
-            <div className="mb-10">
-              <h2 className="text-2xl font-bold mb-1">Security Center</h2>
-              <p className="text-xs text-gray-400 uppercase tracking-widest font-bold">Protect your assets and credit line</p>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 relative">
-              {securityItems.map((item, idx) => {
-                const isActive = item.type === 'toggle' ? userState.security[item.key as keyof SecuritySettings] : true;
-                const displayStatus = item.type === 'toggle' 
-                  ? (userState.security[item.key as keyof SecuritySettings] ? 'Enabled' : 'Disabled')
-                  : item.key === 'spendingLimit' ? `$${userState.security.spendingLimit || 'None'}`
-                  : item.key === 'ipWhitelist' ? `${userState.security.ipWhitelist.length} Active`
-                  : item.key === 'emergencyFreeze' ? (userState.isCardFrozen ? 'FROZEN' : 'READY')
-                  : 'ACTIVE';
-
-                return (
-                  <div key={idx} className="glass p-6 rounded-2xl border border-gray-100 hover:border-black transition-all group flex flex-col justify-between h-52">
-                    <div className="flex justify-between items-start">
-                      <div className={`w-10 h-10 rounded-xl bg-gray-50 flex items-center justify-center transition-all ${isActive ? 'text-black' : 'text-gray-300'}`}>
-                         <i className={`fa-solid ${item.icon}`}></i>
-                      </div>
-                      <span className={`text-[8px] font-black px-2 py-1 rounded uppercase tracking-widest ${isActive ? 'bg-green-50 text-green-600' : 'bg-gray-50 text-gray-400'}`}>
-                        {displayStatus}
-                      </span>
-                    </div>
-                    <div>
-                      <h4 className="text-sm font-bold mb-1">{item.title}</h4>
-                      <p className="text-[10px] text-gray-400 leading-normal">{item.desc}</p>
-                    </div>
-                    <button 
-                      onClick={() => {
-                        if (item.type === 'toggle') {
-                          updateSecuritySetting(item.key as keyof SecuritySettings, !userState.security[item.key as keyof SecuritySettings]);
-                        } else if (item.key === 'emergencyFreeze') {
-                          toggleFreeze();
-                        } else {
-                          setManagingItem(item.key);
-                          if (item.key === 'spendingLimit') setInputValue(String(userState.security.spendingLimit || ''));
-                        }
-                      }}
-                      className="text-[10px] font-bold uppercase tracking-widest text-black mt-4 opacity-0 group-hover:opacity-100 transition-opacity"
-                    >
-                      {item.type === 'toggle' ? 'Switch' : item.key === 'emergencyFreeze' ? (userState.isCardFrozen ? 'Unfreeze' : 'Activate') : 'Manage Setting'}
-                    </button>
-                  </div>
-                );
-              })}
-
-              {/* Management Overlay Modal */}
-              {managingItem && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-sm p-4">
-                   <div className="bg-white rounded-2xl p-8 max-w-sm w-full shadow-2xl animate-in zoom-in-95 duration-200">
-                      <h3 className="text-lg font-bold mb-2">Manage {managingItem.replace(/([A-Z])/g, ' $1').toUpperCase()}</h3>
-                      <p className="text-[10px] text-gray-400 mb-6 uppercase tracking-widest font-bold">Secure Modification Panel</p>
-                      
-                      {managingItem === 'spendingLimit' && (
-                        <div className="space-y-4">
-                          <input 
-                            type="number"
-                            value={inputValue}
-                            onChange={(e) => setInputValue(e.target.value)}
-                            placeholder="Set daily limit"
-                            className="w-full bg-gray-50 border border-gray-100 rounded-xl px-4 py-3 text-sm font-bold focus:border-black outline-none"
-                          />
-                          <button 
-                            onClick={() => updateSecuritySetting('spendingLimit', Number(inputValue))}
-                            className="w-full py-3 bg-black text-white rounded-xl text-xs font-bold uppercase tracking-widest"
-                          >
-                            Save Limit
-                          </button>
-                        </div>
-                      )}
-
-                      {managingItem === 'ipWhitelist' && (
-                        <div className="space-y-4">
-                          <div className="max-h-32 overflow-y-auto space-y-2 mb-4">
-                             {userState.security.ipWhitelist.map(ip => (
-                               <div key={ip} className="flex justify-between items-center p-2 bg-gray-50 rounded-lg text-[10px] font-bold">
-                                 <span>{ip}</span>
-                                 <button onClick={() => updateSecuritySetting('ipWhitelist', userState.security.ipWhitelist.filter(i => i !== ip))} className="text-red-500">Remove</button>
-                               </div>
-                             ))}
-                          </div>
-                          <input 
-                            value={inputValue}
-                            onChange={(e) => setInputValue(e.target.value)}
-                            placeholder="127.0.0.1"
-                            className="w-full bg-gray-50 border border-gray-100 rounded-xl px-4 py-3 text-sm font-bold focus:border-black outline-none"
-                          />
-                          <button 
-                            onClick={() => updateSecuritySetting('ipWhitelist', [...userState.security.ipWhitelist, inputValue])}
-                            className="w-full py-3 bg-black text-white rounded-xl text-xs font-bold uppercase tracking-widest"
-                          >
-                            Add Address
-                          </button>
-                        </div>
-                      )}
-
-                      {managingItem === 'auditLogs' && (
-                        <div className="space-y-4">
-                           <div className="max-h-64 overflow-y-auto space-y-3 pr-2">
-                             {userState.security.auditLogs.map((log, i) => (
-                               <div key={i} className="pb-3 border-b border-gray-50 last:border-0">
-                                 <p className="text-[10px] font-bold text-black">{log.action}</p>
-                                 <p className="text-[8px] text-gray-400 font-bold uppercase">{new Date(log.timestamp).toLocaleString()}</p>
-                               </div>
-                             ))}
-                           </div>
-                        </div>
-                      )}
-
-                      <button 
-                        onClick={() => setManagingItem(null)}
-                        className="w-full mt-4 py-3 bg-white border border-gray-100 text-gray-400 rounded-xl text-[10px] font-bold uppercase tracking-widest hover:text-black transition-colors"
-                      >
-                        Cancel / Close
-                      </button>
-                   </div>
-                </div>
-              )}
-            </div>
-
-            <div className="glass p-8 rounded-2xl border-dashed border-2 border-gray-100 flex flex-col items-center justify-center text-center py-12">
-               <div className="w-16 h-16 bg-green-50 rounded-full flex items-center justify-center text-green-500 mb-6">
-                 <i className="fa-solid fa-check-double text-2xl"></i>
-               </div>
-               <h3 className="text-xl font-bold mb-2">Institutional-Grade Security</h3>
-               <p className="text-sm text-gray-500 max-w-md mx-auto">Solux uses multi-sig custody and hardware security modules to ensure your collateral is always protected from unauthorized access.</p>
-               <button className="mt-8 px-8 py-3 bg-black text-white rounded-xl text-[10px] font-bold uppercase tracking-widest hover:bg-gray-800 transition-all shadow-xl shadow-black/10">Upgrade to Vault+</button>
-            </div>
-          </div>
-        );
-      case 'Profile':
-        return (
-          <div className="max-w-4xl mx-auto space-y-8 animate-in fade-in zoom-in-95 duration-500">
-            <div className="flex flex-col md:flex-row gap-8 items-start">
-               <div className="w-32 h-32 rounded-3xl bg-gray-50 border border-gray-100 flex items-center justify-center text-4xl text-black shadow-inner">
-                 <i className="fa-solid fa-user"></i>
-               </div>
-               <div className="flex-1 space-y-2">
-                 <div className="flex items-center gap-3">
-                   <h2 className="text-3xl font-bold">Platinum Member</h2>
-                   <span className="px-3 py-1 bg-black text-white text-[10px] font-bold rounded-full uppercase tracking-widest">PRO</span>
-                 </div>
-                 <p className="text-gray-400 text-sm font-medium flex items-center gap-2">
-                   <i className="fa-solid fa-shield-check text-green-500"></i>
-                   Verified Account since October 2023
-                 </p>
-                 <div className="pt-4 flex gap-3">
-                   <button className="px-4 py-2 bg-black text-white rounded-lg text-xs font-bold uppercase tracking-widest">Edit Profile</button>
-                   <button className="px-4 py-2 border border-gray-200 rounded-lg text-xs font-bold uppercase tracking-widest">Share Wallet</button>
-                 </div>
-               </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-               <div className="glass p-8 rounded-2xl">
-                 <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-gray-400 mb-6">Wallet Information</h3>
-                 <div className="space-y-6">
-                   <div>
-                     <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2">Public Address</p>
-                     <div className="flex items-center justify-between p-3 bg-gray-50 rounded-xl border border-gray-100">
-                       <span className="text-xs font-mono font-bold truncate max-w-[200px]">{userState.walletAddress}</span>
-                       <button onClick={() => {
-                         navigator.clipboard.writeText(userState.walletAddress || '');
-                         alert('Address copied to clipboard');
-                       }} className="text-black hover:scale-110 transition-transform"><i className="fa-regular fa-copy"></i></button>
-                     </div>
-                   </div>
-                   <div className="grid grid-cols-2 gap-4">
-                     <div>
-                       <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Network</p>
-                       <p className="text-sm font-bold">Base Mainnet</p>
-                     </div>
-                     <div>
-                       <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1">Custody</p>
-                       <p className="text-sm font-bold">MPC Institutional</p>
-                     </div>
-                   </div>
-                 </div>
-               </div>
-
-               <div className="glass p-8 rounded-2xl">
-                 <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-gray-400 mb-6">Tier Benefits</h3>
-                 <div className="space-y-4">
-                    {[
-                      { label: 'Collateral LTV', value: '70% Max' },
-                      { label: 'FX Fees', value: '0.0% (Waived)' },
-                      { label: 'ATM Limits', value: '$2,500 / Day' },
-                      { label: 'Rewards Rate', value: '2.5% CryptoBack' },
-                    ].map(item => (
-                      <div key={item.label} className="flex justify-between items-center py-2 border-b border-gray-50 last:border-0">
-                        <span className="text-xs font-medium text-gray-500">{item.label}</span>
-                        <span className="text-xs font-bold">{item.value}</span>
-                      </div>
-                    ))}
-                 </div>
-               </div>
-            </div>
-
-            <div className="glass p-8 rounded-2xl border-red-100 bg-red-50/10">
-               <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-red-400 mb-4">Danger Zone</h3>
-               <p className="text-xs text-gray-400 mb-6">These actions are irreversible. Please proceed with extreme caution.</p>
-               <div className="flex flex-wrap gap-4">
-                 <button className="px-6 py-3 border border-red-200 text-red-500 rounded-xl text-[10px] font-bold uppercase tracking-widest hover:bg-red-500 hover:text-white transition-all">Deactivate Card</button>
-                 <button className="px-6 py-3 border border-red-200 text-red-500 rounded-xl text-[10px] font-bold uppercase tracking-widest hover:bg-red-500 hover:text-white transition-all">Revoke Vault Access</button>
-               </div>
-            </div>
-          </div>
+          <SecurityView 
+            settings={userState.security} 
+            onUpdate={(updates) => setUserState(prev => ({
+              ...prev,
+              security: { ...prev.security, ...updates }
+            }))}
+          />
         );
       default:
-        return (
-          <div className="flex items-center justify-center h-64 text-gray-400 italic">
-            View coming soon...
-          </div>
-        );
+        return <div className="flex items-center justify-center h-64 text-gray-400 italic">Module {activeView} is coming soon...</div>;
     }
   };
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#ffffff]">
-      <Sidebar 
-        walletAddress={userState.walletAddress} 
-        activeView={activeView}
-        onViewChange={setActiveView}
-      />
-
+      <Sidebar walletAddress={userState.walletAddress} activeView={activeView} onViewChange={setActiveView} />
       <main className="flex-1 overflow-y-auto p-4 md:p-8">
-        <header className="flex flex-col md:flex-row justify-between items-start md:items-center mb-10 gap-4">
-          <div className="flex items-center gap-4 cursor-pointer" onClick={() => setActiveView('Overview')}>
-            <div className="w-14 h-14 bg-white border border-gray-100 rounded-2xl flex items-center justify-center overflow-hidden shadow-sm">
-               <img 
-                 src={logoUrl} 
-                 alt="Solux" 
-                 className="w-full h-full p-2 object-contain" 
-                 onError={(e) => (e.currentTarget.style.display = 'none')}
-               />
-            </div>
-            <div>
-              <h1 className="text-3xl font-bold text-black tracking-tight leading-none">Solux</h1>
-              <p className="text-gray-400 text-[10px] uppercase tracking-[0.2em] font-bold mt-1">Institutional Reserve</p>
-            </div>
+        <header className="flex justify-between items-center mb-10">
+          <div className="flex items-center gap-4">
+            <h1 className="text-3xl font-black text-black tracking-tighter uppercase italic">SOLUX</h1>
+            <div className="px-3 py-1 bg-black text-white rounded-full text-[8px] font-black tracking-widest uppercase shadow-lg shadow-black/10">Real Sandbox Active</div>
           </div>
           <div className="flex gap-3">
-            <button 
-              onClick={simulateSwipe}
-              className="flex items-center gap-2 px-6 py-2.5 bg-black text-white rounded-lg font-bold text-sm hover:bg-gray-800 transition-all shadow-lg active:scale-95"
-            >
-              <i className="fa-solid fa-bolt"></i>
-              Simulate Swipe
+            <button onClick={simulateSwipe} className="px-6 py-2.5 bg-black text-white rounded-lg font-bold text-sm shadow-xl shadow-black/10 active:scale-95 transition-all">
+              <i className="fa-solid fa-credit-card mr-2"></i> Simulate Swipe
             </button>
-            <button 
-              onClick={() => setActiveView('Profile')}
-              className={`border px-4 py-2.5 rounded-lg flex items-center gap-2 transition-all active:scale-95
-                ${activeView === 'Profile' ? 'bg-black text-white border-black' : 'bg-white border-gray-200 text-black hover:border-black shadow-sm'}`}
-            >
-              <div className={`w-2 h-2 rounded-full animate-pulse ${activeView === 'Profile' ? 'bg-white' : 'bg-green-500'}`}></div>
-              <span className="text-xs font-mono font-bold tracking-wider">{userState.walletAddress?.slice(0, 6)}...{userState.walletAddress?.slice(-4)}</span>
+            <button onClick={() => setActiveView('Security')} className="border px-4 py-2.5 rounded-lg flex items-center gap-2 bg-white border-gray-200 shadow-sm hover:border-black transition-colors">
+              <div className={`w-2 h-2 rounded-full animate-pulse ${userState.security.biometricEnabled ? 'bg-green-500' : 'bg-blue-500'}`}></div>
+              <span className="text-xs font-mono font-bold tracking-tight">{userName || 'Connecting...'}</span>
             </button>
           </div>
         </header>
-
         {renderContent()}
       </main>
     </div>

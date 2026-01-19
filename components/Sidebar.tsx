@@ -14,6 +14,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ walletAddress, activeView, onV
     { icon: 'fa-house', label: 'Overview' },
     { icon: 'fa-vault', label: 'Assets' },
     { icon: 'fa-credit-card', label: 'Credit Card' },
+    { icon: 'fa-code', label: 'Developer' },
     { icon: 'fa-clock-rotate-left', label: 'History' },
     { icon: 'fa-shield-halved', label: 'Security' },
   ];
@@ -28,22 +29,11 @@ export const Sidebar: React.FC<SidebarProps> = ({ walletAddress, activeView, onV
             className="w-full h-full p-1 object-contain"
             crossOrigin="anonymous"
             loading="eager"
-            onError={(e) => {
-              const target = e.target as HTMLImageElement;
-              target.style.display = 'none';
-              const parent = target.parentElement;
-              if (parent && !parent.querySelector('.fallback-icon')) {
-                const fallback = document.createElement('div');
-                fallback.className = 'fallback-icon w-full h-full bg-black flex items-center justify-center text-white font-bold text-lg rounded-xl';
-                fallback.innerText = 'S';
-                parent.appendChild(fallback);
-              }
-            }}
           />
         </div>
         <div className="flex flex-col">
           <span className="text-xl font-bold tracking-tighter uppercase text-black leading-none">SOLUX</span>
-          <span className="text-[7px] text-gray-400 font-bold tracking-[0.2em] mt-1">SOLUX</span>
+          <span className="text-[7px] text-blue-500 font-bold tracking-[0.2em] mt-1">SANDBOX</span>
         </div>
       </div>
 
@@ -62,21 +52,21 @@ export const Sidebar: React.FC<SidebarProps> = ({ walletAddress, activeView, onV
         ))}
       </nav>
 
-      <div className="mt-8 p-5 rounded-xl border border-gray-100 bg-gray-50">
-        <p className="text-[10px] text-black font-bold uppercase tracking-widest mb-1">Status: Platinum</p>
-        <p className="text-[11px] text-gray-500 leading-relaxed mb-4">Your current tier grants 70% LTV on stablecoins.</p>
+      <div className="mt-8 p-5 rounded-xl border border-gray-100 bg-blue-50/30">
+        <p className="text-[10px] text-blue-600 font-black uppercase tracking-widest mb-1">Developer API</p>
+        <p className="text-[11px] text-gray-500 leading-relaxed mb-4">Lithic Sandbox is currently active with simulated responses.</p>
         <button 
-          onClick={() => onViewChange('Profile')}
-          className="w-full py-2 bg-white border border-gray-200 text-black text-[10px] font-bold rounded-md hover:bg-black hover:text-white transition-all shadow-sm active:scale-95"
+          onClick={() => onViewChange('Developer')}
+          className="w-full py-2 bg-white border border-blue-100 text-blue-600 text-[10px] font-bold rounded-md hover:bg-blue-600 hover:text-white transition-all shadow-sm active:scale-95"
         >
-          VIEW BENEFITS
+          VIEW LOGS
         </button>
       </div>
       
       <button 
         onClick={() => onViewChange('Profile')}
         className={`mt-6 flex items-center gap-3 px-3 py-3 rounded-xl border transition-all text-left w-full
-          ${activeView === 'Profile' ? 'bg-black border-black ring-2 ring-black/5 shadow-lg' : 'bg-white border-gray-100 hover:border-black hover:shadow-md'}`}
+          ${activeView === 'Profile' ? 'bg-black border-black shadow-lg' : 'bg-white border-gray-100 hover:border-black hover:shadow-md'}`}
       >
          <div className={`w-8 h-8 rounded-full flex items-center justify-center overflow-hidden border shrink-0
            ${activeView === 'Profile' ? 'bg-white/10 border-white/20' : 'bg-gray-200 border-gray-100'}`}>
@@ -84,13 +74,12 @@ export const Sidebar: React.FC<SidebarProps> = ({ walletAddress, activeView, onV
          </div>
          <div className="flex-1 overflow-hidden">
            <p className={`text-[11px] font-bold truncate ${activeView === 'Profile' ? 'text-white' : 'text-black'}`}>
-            {walletAddress || 'Not Connected'}
+            {walletAddress || 'Dev-User-01'}
            </p>
            <p className={`text-[9px] font-medium ${activeView === 'Profile' ? 'text-white/60' : 'text-gray-400'}`}>
-            Verified Account
+            Sandbox Admin
            </p>
          </div>
-         <i className={`fa-solid fa-chevron-right text-[8px] ${activeView === 'Profile' ? 'text-white/40' : 'text-gray-300'}`}></i>
       </button>
     </aside>
   );

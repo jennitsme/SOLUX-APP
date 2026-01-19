@@ -10,7 +10,14 @@ export interface CollateralAsset {
   type: AssetType;
   amount: number;
   price: number;
-  ltv: number; // Max loan-to-value (e.g., 0.7)
+  ltv: number; 
+}
+
+// Added missing MarketPrice interface used in constants.ts
+export interface MarketPrice {
+  asset: AssetType;
+  price: number;
+  change24h: number;
 }
 
 export interface SecuritySettings {
@@ -29,6 +36,8 @@ export interface UserState {
   transactions: Transaction[];
   isCardFrozen: boolean;
   security: SecuritySettings;
+  lithicAccountToken?: string;
+  lithicCardToken?: string;
 }
 
 export interface Transaction {
@@ -40,8 +49,28 @@ export interface Transaction {
   category: string;
 }
 
-export interface MarketPrice {
-  asset: AssetType;
-  price: number;
-  change24h: number;
+export interface ApiLog {
+  id: string;
+  endpoint: string;
+  method: 'POST' | 'GET' | 'PUT';
+  status: number;
+  timestamp: number;
+  payload: any;
+  response: any;
+}
+
+// Lithic Specific Interfaces
+export interface LithicEnrollment {
+  first_name: string;
+  last_name: string;
+  email: string;
+  dob: string;
+  address: {
+    address1: string;
+    city: string;
+    state: string;
+    postal_code: string;
+    country: string;
+  };
+  ssn_last_four: string;
 }
