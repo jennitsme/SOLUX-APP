@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { AssetType, UserState, Transaction, CollateralAsset, SecuritySettings } from './types';
 import { INITIAL_COLLATERAL, MOCK_MARKET_PRICES, ASSET_ICONS } from './constants';
 import { Sidebar } from './components/Sidebar';
@@ -13,11 +13,88 @@ import {
   calculateHealthFactor 
 } from './services/collateralService';
 
+// Custom SVG Line Chart Component for Health Factor
+const HealthFactorChart: React.FC<{ data: number[] }> = ({ data }) => {
+  const width = 500;
+  const height = 150;
+  const padding = 20;
+  
+  const points = useMemo(() => {
+    const maxVal = Math.max(...data, 2.0); // Ensure scale covers at least 2.0
+    const minVal = 0.8; // Focus on the danger zone
+    
+    return data.map((val, i) => {
+      const x = (i / (data.length - 1)) * (width - padding * 2) + padding;
+      const y = height - ((val - minVal) / (maxVal - minVal)) * (height - padding * 2) - padding;
+      return { x, y };
+    });
+  }, [data]);
+
+  const linePath = useMemo(() => {
+    if (points.length < 2) return "";
+    return points.reduce((acc, point, i) => 
+      i === 0 ? `M ${point.x} ${point.y}` : `${acc} L ${point.x} ${point.y}`, "");
+  }, [points]);
+
+  const areaPath = useMemo(() => {
+    if (points.length < 2) return "";
+    return `${linePath} L ${points[points.length - 1].x} ${height} L ${points[0].x} ${height} Z`;
+  }, [points, linePath]);
+
+  return (
+    <div className="w-full relative h-[180px]">
+      <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-full overflow-visible">
+        <defs>
+          <linearGradient id="areaGradient" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="rgba(0,0,0,0.05)" />
+            <stop offset="100%" stopColor="transparent" />
+          </linearGradient>
+        </defs>
+        
+        {/* Horizontal Grid Lines */}
+        <line x1={padding} y1={height - padding} x2={width - padding} y2={height - padding} stroke="#f3f4f6" strokeWidth="1" />
+        <line x1={padding} y1={padding} x2={width - padding} y2={padding} stroke="#f3f4f6" strokeWidth="1" />
+        
+        {/* Liquidation Threshold Line */}
+        <line 
+          x1={padding} 
+          y1={height - (0.2 / 1.2) * (height - padding * 2) - padding} 
+          x2={width - padding} 
+          y2={height - (0.2 / 1.2) * (height - padding * 2) - padding} 
+          stroke="#fee2e2" 
+          strokeWidth="1" 
+          strokeDasharray="4 4" 
+        />
+
+        <path d={areaPath} fill="url(#areaGradient)" />
+        <path d={linePath} fill="none" stroke="black" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+        
+        {/* Current Point Dot */}
+        {points.length > 0 && (
+          <circle 
+            cx={points[points.length - 1].x} 
+            cy={points[points.length - 1].y} 
+            r="4" 
+            fill="black" 
+            className="animate-pulse"
+          />
+        )}
+      </svg>
+      <div className="absolute top-0 right-0 text-[10px] font-bold text-red-400 uppercase tracking-widest bg-red-50/50 px-2 py-1 rounded">
+        Liquidation Point (1.0)
+      </div>
+    </div>
+  );
+};
+
 const App: React.FC = () => {
   const [activeView, setActiveView] = useState('Overview');
   const [isLoading, setIsLoading] = useState(true);
   const [managingItem, setManagingItem] = useState<string | null>(null);
   const [inputValue, setInputValue] = useState('');
+
+  // Mock historical health factors for the chart (7 days)
+  const [historicalHealth] = useState([1.8, 1.75, 1.82, 1.65, 1.72, 1.68, 1.71]);
 
   const [userState, setUserState] = useState<UserState>({
     walletAddress: '0x71C837C78383B3698008882D3D3D3D4e5B71c837',
@@ -178,24 +255,39 @@ const App: React.FC = () => {
                     onDeposit={handleDeposit}
                     isLoading={isLoading}
                  />
-                 <div className="glass p-6 rounded-2xl">
-                   <div className="flex justify-between items-center mb-6">
+                 
+                 {/* Replaced progress bar with dynamic line chart */}
+                 <div className="glass p-8 rounded-2xl border border-gray-100">
+                   <div className="flex justify-between items-start mb-8">
                      <div>
-                       <h3 className="text-lg font-bold">Credit Utilization</h3>
-                       <p className="text-xs text-gray-400">Dynamic collateral health metrics</p>
+                       <h3 className="text-lg font-bold">Health Factor Stability</h3>
+                       <p className="text-xs text-gray-400">7-Day volatility and liquidation monitoring</p>
                      </div>
-                     <span className="text-sm font-mono font-bold">${userState.creditUsed.toFixed(2)} / ${userState.totalLimit.toFixed(2)}</span>
+                     <div className="text-right">
+                       <span className="text-2xl font-black text-black">{healthFactor.toFixed(2)}</span>
+                       <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">Current Index</p>
+                     </div>
                    </div>
-                   <div className="w-full h-4 bg-gray-100 rounded-full overflow-hidden p-0.5">
-                     <div 
-                       className={`h-full transition-all duration-1000 rounded-full ${userState.creditUsed / userState.totalLimit > 0.85 ? 'bg-red-500' : 'bg-black'}`}
-                       style={{ width: `${Math.min((userState.creditUsed / userState.totalLimit) * 100, 100)}%` }}
-                     ></div>
-                   </div>
-                   <div className="flex justify-between mt-4 text-[10px] text-gray-400 font-bold uppercase tracking-[0.1em]">
-                      <span>Safety Zone</span>
-                      <span>Standard LTV</span>
-                      <span>Liquidation Point</span>
+                   
+                   <HealthFactorChart data={[...historicalHealth, healthFactor]} />
+                   
+                   <div className="flex justify-between mt-8">
+                     <div className="flex gap-8">
+                        <div>
+                          <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mb-1">Status</p>
+                          <div className="flex items-center gap-2">
+                             <div className="w-2 h-2 rounded-full bg-green-500"></div>
+                             <span className="text-xs font-bold">Stable</span>
+                          </div>
+                        </div>
+                        <div>
+                          <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mb-1">Buffer</p>
+                          <span className="text-xs font-bold">42.5% Safe</span>
+                        </div>
+                     </div>
+                     <button className="text-[10px] font-bold uppercase tracking-widest border-b border-black pb-0.5 hover:text-gray-500 hover:border-gray-500 transition-colors">
+                       View Detailed Report
+                     </button>
                    </div>
                  </div>
               </div>
